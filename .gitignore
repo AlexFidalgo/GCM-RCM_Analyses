@@ -1,0 +1,35 @@
+# Common Python exclusions
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Common LaTeX exclusions (if applicable)
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# mine
+gcm_rcm_venv/
+*.nc
+*.mat
+*.xlsx
+*.csv
+*.pyc
+*.json
+*.pdf
+*.png
+.Rproj.user
+.RData
+.Rhistory
+cartopy_data/
+*.Rproj
+*.zip
+complete_files/
+glm_summary.txt
