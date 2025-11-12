@@ -12,6 +12,8 @@ import os
 import pandas as pd
 from sqlalchemy import create_engine, text
 
+from utils import get_db_connection
+
 # Metrics of interest for exploration
 TARGET_METRICS = [
     'H10 (MAHE)',
@@ -21,22 +23,6 @@ TARGET_METRICS = [
     'MV',
     'KGE (2009)'
 ]
-
-
-def get_db_connection():
-    """Create and return a database engine connection."""
-    db_name = os.getenv("DB_NAME")
-    db_user = os.getenv("DB_USER")
-    db_password = os.getenv("DB_PASSWORD")
-    db_host = os.getenv("DB_HOST")
-    db_port = os.getenv("DB_PORT")
-    
-    if not all([db_name, db_user, db_password, db_host, db_port]):
-        raise ValueError("Database connection parameters not found in environment variables")
-    
-    engine = create_engine(f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}")
-    return engine
-
 
 def fetch_error_metrics():
     """

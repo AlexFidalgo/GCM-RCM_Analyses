@@ -33,3 +33,5 @@ cartopy_data/
 *.zip
 complete_files/
 glm_summary.txt
+
+/metrics_correlations/notebook_venv/
