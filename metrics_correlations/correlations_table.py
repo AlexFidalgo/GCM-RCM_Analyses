@@ -76,6 +76,31 @@ def load_subset(conn, region, physical, metric_subset):
     return pd.read_sql_query(query, conn, params=params)
 
 
+def load_physical_all(conn, physical, metric_subset):
+    """Load all regions for a given physical_variable."""
+    metric_clause, metric_params = build_metric_placeholders(metric_subset)
+    query = text(
+        f"""
+        SELECT
+            error.region,
+            error.gridpoint,
+            error.physical_variable,
+            error.model,
+            error.rcm_id,
+            error.gcm_id,
+            metrics.metric_name,
+            error.mat_vector
+        FROM error
+        LEFT JOIN metrics ON metrics.id = error.metric_id
+        WHERE error.physical_variable = :physical
+          AND metrics.metric_name IN ({metric_clause})
+        """
+    )
+    params = {"physical": physical}
+    params.update(metric_params)
+    return pd.read_sql_query(query, conn, params=params)
+
+
 def compute_corr_matrix(sub_df: pd.DataFrame) -> pd.DataFrame:
     """Compute correlation matrix for the subset; return empty DF if insufficient data."""
     if sub_df.empty:
@@ -127,11 +152,18 @@ def main():
         rows = []
 
         for phys in tqdm(physical_values, desc="Physical variables"):
+            phys_all_df = load_physical_all(conn, phys, metrics_to_use)
+            total_corr_matrix = compute_corr_matrix(phys_all_df)
+
             # Pre-build row shells so we only set correlations as we compute them.
             pair_rows = {
                 (m1, m2): {
                     'physical_variable': phys,
-                    'metric_x_with_metric_y': f"{m1} with {m2}",
+                    'metric1': m1,
+                    'metric2': m2,
+                    'total_corr': round(total_corr_matrix.loc[m1, m2], 3)
+                    if (m1 in total_corr_matrix.index and m2 in total_corr_matrix.columns and pd.notnull(total_corr_matrix.loc[m1, m2]))
+                    else None,
                     **{region: None for region in region_columns}
                 }
                 for m1, m2 in metric_pairs
@@ -156,11 +188,11 @@ def main():
     if correlation_table.empty:
         raise ValueError("No correlation rows were produced for the given filters.")
 
-    # Drop rows where all region values are missing
+    # Drop rows where all region values and total_corr are missing
     region_fields = region_columns
-    if region_fields:
-        has_data = correlation_table[region_fields].notnull().any(axis=1)
-        correlation_table = correlation_table[has_data]
+    drop_fields = region_fields + ['total_corr']
+    has_data = correlation_table[drop_fields].notnull().any(axis=1)
+    correlation_table = correlation_table[has_data]
 
     output_path = os.path.join(OUTPUT_DIR, 'correlations_table.xlsx')
     correlation_table.to_excel(output_path, index=False)
