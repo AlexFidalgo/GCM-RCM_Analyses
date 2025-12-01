@@ -5,16 +5,19 @@ of a given physical_variable.
 
 Configuration is done via global variables at the top of the file.
 
-Results are saved into:
-    results/<physical_variable>/<metric_slug>_results.txt
-    + optional summary CSV when running all metrics.
+For each (physical_variable, metric_name), the script:
+- Computes normality & symmetry diagnostics
+- Checks homoscedasticity across GCMs and RCMs
+- Saves a text report in results/<phys_var>/<metric_slug>_results.txt
+- Optionally saves individual histogram and QQ plot
 
-Plots saved into:
-    figs/<physical_variable>/<metric_slug>_hist.png
-    figs/<physical_variable>/<metric_slug>_qq.png
+If METRIC_NAME is None (all metrics for that physical variable), it also creates:
+- figs/<phys_var>/summary_histograms.png  (all histograms in one figure)
+- figs/<phys_var>/summary_qqplots.png     (all QQ plots in one figure)
 """
 
 import os
+import math
 from pathlib import Path
 
 import numpy as np
@@ -31,11 +34,14 @@ from tqdm import tqdm
 
 PHYSICAL_VARIABLE = "ppt"     # "ppt" or "tas"
 METRIC_NAME = None            # e.g. "ACC" or None for ALL metrics
-MAKE_PLOTS = True             # Save histogram + QQ
+MAKE_PLOTS = True             # Save individual histogram + QQ per metric
 
 BASE_DIR = Path(__file__).resolve().parent
 FIGS_BASE_DIR = BASE_DIR / "figs"
 RESULTS_BASE_DIR = BASE_DIR / "results"
+
+# Max number of points to use for summary plots (per metric)
+MAX_POINTS_FOR_SUMMARY = 10_000
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +131,7 @@ def check_normality_and_symmetry(series: pd.Series, max_shapiro_n: int = 5000):
     skew_test = stats.skewtest(x) if n >= 8 else None
     normal_test = stats.normaltest(x) if n >= 8 else None
 
+    # Shapiro on a subsample if too large
     if n > max_shapiro_n:
         rng = np.random.default_rng(42)
         sample_idx = rng.choice(n, size=max_shapiro_n, replace=False)
@@ -196,7 +203,7 @@ def check_homoscedasticity(df: pd.DataFrame, value_col: str = "mat_vector"):
 
 
 # ---------------------------------------------------------------------------
-# PLOTTING
+# PLOTTING HELPERS
 # ---------------------------------------------------------------------------
 
 def slugify_metric_name(metric_name: str) -> str:
@@ -209,29 +216,92 @@ def slugify_metric_name(metric_name: str) -> str:
     return slug.strip("_")
 
 
-def make_plots(series: pd.Series, physical_variable: str, metric_name: str):
+def make_individual_plots(series: pd.Series, physical_variable: str, metric_name: str):
+    """Save histogram and QQ plot for one metric."""
     metric_slug = slugify_metric_name(metric_name)
     figs_dir = FIGS_BASE_DIR / physical_variable
     figs_dir.mkdir(parents=True, exist_ok=True)
 
     x = series.to_numpy()
-    prefix = f"{physical_variable} · {metric_name}"
+    title_prefix = f"{physical_variable} · {metric_name}"
 
     # Histogram
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.hist(x, bins=60, alpha=0.8)
-    ax.set_title(f"{prefix} – Histogram")
+    ax.set_title(f"{title_prefix} – Histogram")
+    ax.set_xlabel("mat_vector")
+    ax.set_ylabel("Frequency")
     fig.tight_layout()
-    fig.savefig(figs_dir / f"{metric_slug}_hist.png")
+    fig.savefig(figs_dir / f"{metric_slug}_hist.png", dpi=150)
     plt.close(fig)
 
     # QQ plot
     fig, ax = plt.subplots(figsize=(8, 5))
     stats.probplot(x, dist="norm", plot=ax)
-    ax.set_title(f"{prefix} – QQ Plot")
+    ax.set_title(f"{title_prefix} – QQ Plot")
     fig.tight_layout()
-    fig.savefig(figs_dir / f"{metric_slug}_qq.png")
+    fig.savefig(figs_dir / f"{metric_slug}_qq.png", dpi=150)
     plt.close(fig)
+
+
+def make_summary_plots(summary_plot_data, physical_variable: str):
+    """
+    Create two summary figures for a given physical variable:
+    - one with all histograms
+    - one with all QQ plots
+    summary_plot_data is a list of dicts:
+        {"metric_name": ..., "hist_sample": np.array, "qq_sample": np.array}
+    """
+    if not summary_plot_data:
+        return
+
+    figs_dir = FIGS_BASE_DIR / physical_variable
+    figs_dir.mkdir(parents=True, exist_ok=True)
+
+    n_metrics = len(summary_plot_data)
+    ncols = 4
+    nrows = math.ceil(n_metrics / ncols)
+
+    # --- Summary histograms ---
+    fig_h, axes_h = plt.subplots(nrows, ncols,
+                                 figsize=(4 * ncols, 3 * nrows),
+                                 squeeze=False)
+    axes_h = axes_h.flatten()
+
+    for i, pdata in enumerate(summary_plot_data):
+        ax = axes_h[i]
+        ax.hist(pdata["hist_sample"], bins=40, alpha=0.8)
+        ax.set_title(pdata["metric_name"], fontsize=8)
+        ax.tick_params(labelsize=6)
+
+    # Turn off unused axes
+    for j in range(n_metrics, len(axes_h)):
+        axes_h[j].axis("off")
+
+    fig_h.suptitle(f"{physical_variable} – Histograms for all metrics", fontsize=14)
+    fig_h.tight_layout(rect=[0, 0, 1, 0.96])
+    fig_h.savefig(figs_dir / "summary_histograms.png", dpi=150)
+    plt.close(fig_h)
+
+    # --- Summary QQ plots ---
+    fig_q, axes_q = plt.subplots(nrows, ncols,
+                                 figsize=(4 * ncols, 3 * nrows),
+                                 squeeze=False)
+    axes_q = axes_q.flatten()
+
+    for i, pdata in enumerate(summary_plot_data):
+        ax = axes_q[i]
+        stats.probplot(pdata["qq_sample"], dist="norm", plot=ax)
+        ax.set_title(pdata["metric_name"], fontsize=8)
+        ax.tick_params(labelsize=6)
+
+    for j in range(n_metrics, len(axes_q)):
+        axes_q[j].axis("off")
+
+    fig_q.suptitle(f"{physical_variable} – QQ plots for all metrics", fontsize=14)
+    fig_q.tight_layout(rect=[0, 0, 1, 0.96])
+    fig_q.savefig(figs_dir / "summary_qqplots.png", dpi=150)
+    plt.close(fig_q)
 
 
 # ---------------------------------------------------------------------------
@@ -306,16 +376,23 @@ def save_results_text(out_path: Path, physical_variable: str, metric_name: str,
 # ---------------------------------------------------------------------------
 
 def analyze_one_metric(engine, physical_variable: str, metric_name: str):
+    """
+    Run diagnostics for a single (physical_variable, metric_name).
+    Returns:
+      - summary_row (dict) for CSV
+      - plot_data (dict) for summary plots:
+          {"metric_name", "hist_sample", "qq_sample"}
+    """
     df = load_mat_vector(engine, physical_variable, metric_name)
     if df.empty:
-        return None
+        return None, None
 
-    x = df["mat_vector"]
+    x = df["mat_vector"].to_numpy()
 
-    norm_sym = check_normality_and_symmetry(x)
+    norm_sym = check_normality_and_symmetry(pd.Series(x))
     homo = check_homoscedasticity(df)
 
-    # Save results to text file
+    # Save text results
     metric_slug = slugify_metric_name(metric_name)
     out_dir = RESULTS_BASE_DIR / physical_variable
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -323,12 +400,12 @@ def analyze_one_metric(engine, physical_variable: str, metric_name: str):
     out_path = out_dir / f"{metric_slug}_results.txt"
     save_results_text(out_path, physical_variable, metric_name, norm_sym, homo)
 
-    # Save plots
+    # Save individual plots
     if MAKE_PLOTS:
-        make_plots(x, physical_variable, metric_name)
+        make_individual_plots(pd.Series(x), physical_variable, metric_name)
 
-    # Return summary row for later CSV aggregation
-    return {
+    # Prepare summary row
+    summary_row = {
         "metric_name": metric_name,
         "n": norm_sym["desc"]["n"],
         "skew": norm_sym["skew"],
@@ -337,6 +414,22 @@ def analyze_one_metric(engine, physical_variable: str, metric_name: str):
         "shapiro_p": norm_sym["shapiro"].pvalue if norm_sym["shapiro"] else None,
         "ks_p": norm_sym["ks"].pvalue if norm_sym["ks"] else None,
     }
+
+    # Prepare samples for summary plots (subsample for speed)
+    if len(x) > MAX_POINTS_FOR_SUMMARY:
+        rng = np.random.default_rng(123)
+        idx = rng.choice(len(x), size=MAX_POINTS_FOR_SUMMARY, replace=False)
+        sample = x[idx]
+    else:
+        sample = x
+
+    plot_data = {
+        "metric_name": metric_name,
+        "hist_sample": sample,
+        "qq_sample": sample,
+    }
+
+    return summary_row, plot_data
 
 
 # ---------------------------------------------------------------------------
@@ -347,23 +440,31 @@ def main():
     engine = get_engine()
 
     if METRIC_NAME is None:
-        # run for all metrics
+        # run for all metrics of this physical variable
         metric_names = get_metric_names_for_physical_variable(engine, PHYSICAL_VARIABLE)
         summary_rows = []
+        summary_plot_data = []
 
         for m in tqdm(metric_names, desc=f"Metrics for {PHYSICAL_VARIABLE}"):
-            row = analyze_one_metric(engine, PHYSICAL_VARIABLE, m)
+            row, pdata = analyze_one_metric(engine, PHYSICAL_VARIABLE, m)
             if row:
                 summary_rows.append(row)
+            if pdata:
+                summary_plot_data.append(pdata)
 
         # Save summary CSV
         if summary_rows:
             out_dir = RESULTS_BASE_DIR / PHYSICAL_VARIABLE
             out_dir.mkdir(parents=True, exist_ok=True)
             df_sum = pd.DataFrame(summary_rows)
-            df_sum.to_csv(out_dir / "summary.csv", index=False)
+            df_sum.to_excel(out_dir / "summary.xlsx", index=False)
+
+        # Make summary figures with all histograms and all QQ plots
+        if summary_plot_data:
+            make_summary_plots(summary_plot_data, PHYSICAL_VARIABLE)
 
     else:
+        # just one metric
         analyze_one_metric(engine, PHYSICAL_VARIABLE, METRIC_NAME)
 
 
