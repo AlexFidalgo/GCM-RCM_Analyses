@@ -26,6 +26,7 @@ from sqlalchemy import create_engine, text
 from scipy import stats
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+from typing import Optional
 
 
 # ---------------------------------------------------------------------------
@@ -39,6 +40,8 @@ MAKE_PLOTS = True             # Save individual histogram + QQ per metric
 BASE_DIR = Path(__file__).resolve().parent
 FIGS_BASE_DIR = BASE_DIR / "figs"
 RESULTS_BASE_DIR = BASE_DIR / "results"
+# BM has region-specific definitions, so we expand it into one metric per region.
+BM_REGIONS = ["AL", "SC", "MD", "BI", "IP", "FR", "ME", "EA"]
 
 # Max number of points to use for summary plots (per metric)
 MAX_POINTS_FOR_SUMMARY = 10_000
@@ -67,8 +70,11 @@ def get_engine():
 # DATA LOADING
 # ---------------------------------------------------------------------------
 
-def load_mat_vector(engine, physical_variable: str, metric_name: str) -> pd.DataFrame:
-    query = text("""
+def load_mat_vector(engine, physical_variable: str, metric_name: str,
+                    region: Optional[str] = None) -> pd.DataFrame:
+    region_clause = "AND e.region = :region" if region else ""
+
+    query = text(f"""
         SELECT
             e.region,
             e.gridpoint,
@@ -82,12 +88,20 @@ def load_mat_vector(engine, physical_variable: str, metric_name: str) -> pd.Data
         LEFT JOIN metrics m ON m.id = e.metric_id
         WHERE e.physical_variable = :physical_variable
           AND m.metric_name = :metric_name
+          {region_clause}
     """)
+
+    params = {
+        "physical_variable": physical_variable,
+        "metric_name": metric_name,
+    }
+    if region:
+        params["region"] = region
 
     df = pd.read_sql_query(
         query,
         con=engine,
-        params={"physical_variable": physical_variable, "metric_name": metric_name},
+        params=params,
     )
 
     return df.dropna(subset=["mat_vector"])
@@ -375,17 +389,20 @@ def save_results_text(out_path: Path, physical_variable: str, metric_name: str,
 # ANALYZE ONE METRIC
 # ---------------------------------------------------------------------------
 
-def analyze_one_metric(engine, physical_variable: str, metric_name: str):
+def analyze_one_metric(engine, physical_variable: str, metric_name: str,
+                       region: Optional[str] = None):
     """
-    Run diagnostics for a single (physical_variable, metric_name).
+    Run diagnostics for a single (physical_variable, metric_name[, region]).
     Returns:
       - summary_row (dict) for CSV
       - plot_data (dict) for summary plots:
           {"metric_name", "hist_sample", "qq_sample"}
     """
-    df = load_mat_vector(engine, physical_variable, metric_name)
+    df = load_mat_vector(engine, physical_variable, metric_name, region=region)
     if df.empty:
         return None, None
+
+    metric_label = f"{metric_name}_{region}" if region else metric_name
 
     x = df["mat_vector"].to_numpy()
 
@@ -393,20 +410,20 @@ def analyze_one_metric(engine, physical_variable: str, metric_name: str):
     homo = check_homoscedasticity(df)
 
     # Save text results
-    metric_slug = slugify_metric_name(metric_name)
+    metric_slug = slugify_metric_name(metric_label)
     out_dir = RESULTS_BASE_DIR / physical_variable
     out_dir.mkdir(parents=True, exist_ok=True)
 
     out_path = out_dir / f"{metric_slug}_results.txt"
-    save_results_text(out_path, physical_variable, metric_name, norm_sym, homo)
+    save_results_text(out_path, physical_variable, metric_label, norm_sym, homo)
 
     # Save individual plots
     if MAKE_PLOTS:
-        make_individual_plots(pd.Series(x), physical_variable, metric_name)
+        make_individual_plots(pd.Series(x), physical_variable, metric_label)
 
     # Prepare summary row
     summary_row = {
-        "metric_name": metric_name,
+        "metric_name": metric_label,
         "n": norm_sym["desc"]["n"],
         "skew": norm_sym["skew"],
         "kurtosis": norm_sym["kurtosis"],
@@ -424,7 +441,7 @@ def analyze_one_metric(engine, physical_variable: str, metric_name: str):
         sample = x
 
     plot_data = {
-        "metric_name": metric_name,
+        "metric_name": metric_label,
         "hist_sample": sample,
         "qq_sample": sample,
     }
@@ -446,11 +463,19 @@ def main():
         summary_plot_data = []
 
         for m in tqdm(metric_names, desc=f"Metrics for {PHYSICAL_VARIABLE}"):
-            row, pdata = analyze_one_metric(engine, PHYSICAL_VARIABLE, m)
-            if row:
-                summary_rows.append(row)
-            if pdata:
-                summary_plot_data.append(pdata)
+            if m == "BM":
+                for region in BM_REGIONS:
+                    row, pdata = analyze_one_metric(engine, PHYSICAL_VARIABLE, m, region=region)
+                    if row:
+                        summary_rows.append(row)
+                    if pdata:
+                        summary_plot_data.append(pdata)
+            else:
+                row, pdata = analyze_one_metric(engine, PHYSICAL_VARIABLE, m)
+                if row:
+                    summary_rows.append(row)
+                if pdata:
+                    summary_plot_data.append(pdata)
 
         # Save summary CSV
         if summary_rows:
@@ -465,7 +490,11 @@ def main():
 
     else:
         # just one metric
-        analyze_one_metric(engine, PHYSICAL_VARIABLE, METRIC_NAME)
+        if METRIC_NAME == "BM":
+            for region in BM_REGIONS:
+                analyze_one_metric(engine, PHYSICAL_VARIABLE, METRIC_NAME, region=region)
+        else:
+            analyze_one_metric(engine, PHYSICAL_VARIABLE, METRIC_NAME)
 
 
 if __name__ == "__main__":
